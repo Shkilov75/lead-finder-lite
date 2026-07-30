@@ -1,0 +1,91 @@
+# Session log
+
+What was built, why, and what went wrong along the way. CLAUDE.md holds the
+rules a future session must follow; this file holds the narrative behind them.
+
+## Session 1 — 2026-07-30 — Vite scaffold to a working CRM (`b7ef3c3`)
+
+- Set up Tailwind CSS v4 in the original Vite project — plugin, `@theme` design
+  tokens mapped to the existing palette, and an `@source not` rule after I found
+  that class names quoted in CLAUDE.md prose were compiling into the real
+  stylesheet. Superseded later in the session by the Next.js migration.
+- Migrated the repo from the untouched Vite + JavaScript scaffold to Next.js 16
+  + TypeScript + Tailwind v4, using the TailAdmin free admin template as the
+  base.
+- Trimmed the template to what this app actually uses: dropped the demo pages,
+  seven unused dependencies (FullCalendar, ApexCharts, jVectorMap, Swiper,
+  react-dnd, react-dropzone, Flatpickr), and roughly 460 lines of third-party
+  CSS, leaving four runtime dependencies.
+- Built two pages behind a shared sidebar and header shell: a dashboard with
+  per-stage lead counts and the five most recent leads, and a CRM page with the
+  full lead table and an add-lead modal.
+- Implemented lead state in a single React context backed by `localStorage`,
+  seeded with three example leads. Statuses advance New → Contacted → Replied →
+  Closed on click and wrap around, so a misclick is recoverable.
+- Kept research notes manual by design — no scraping, no enrichment, no external
+  API calls — and recorded that as a deliberate constraint rather than an
+  unfinished edge.
+- Fixed defects inherited from the template: a search form that reloaded the
+  page on Enter or on the ⌘K keycap, a relative logo path that broke on nested
+  routes, a textarea that rendered its own value in placeholder gray and had no
+  `id` for its label, a `Button` with no `type` prop, a `TableCell` with no
+  `colSpan`, a white flash on load for dark-mode visitors, and two menus
+  shipping fabricated content and links to routes that don't exist here.
+- Fixed a data-loss bug of my own: storage reads collapsed "nothing saved" and
+  "saved but invalid" into the same empty array, so adding a field to the lead
+  shape would have silently erased every saved lead. Reads now return a tagged
+  union, only a missing key seeds, and unparseable values are backed up before
+  replacement.
+- Verified the app in a real browser with Playwright rather than by build output
+  alone — pipeline clicks, modal validation, reload persistence, dark mode, and
+  the three storage-corruption paths. Two defects surfaced only this way: the
+  gray textarea text, and a hydration mismatch I introduced with the pre-paint
+  theme script.
+- Documented the architecture, the load-bearing invariants, and every deliberate
+  deviation from the template in CLAUDE.md, and rewrote README.md around the app
+  and its stretch goals.
+- Committed as `b7ef3c3` on branch `feat/lead-finder-crm` (not `main`, since
+  that's the default branch); no remote is configured, so nothing was pushed.
+
+## Session 2 — 2026-07-30 — UI review, rebrand, avatar (`3140ed2`, `5d881c8`)
+
+- Reviewed the finished UI in Chrome through browser automation rather than
+  build output: both pages, add-lead validation and a save with Cyrillic input,
+  status advance on click, delete, persistence across reload, dark mode
+  persistence, and a 420px viewport where the table scrolls inside its own
+  container without the body overflowing. No hydration errors surfaced; one
+  Next.js image warning did.
+- Added `className="h-auto"` to the four logo `<Image>` tags as asked, then
+  reported that it did not silence the warning — Tailwind's preflight already
+  applies `height: auto` to every `img`, so the class only restated what was in
+  force. The actual cause was that both logo SVGs are intrinsically 154×32 while
+  `AppSidebar` declared 150×40, making the rendered height ≈31px against a
+  claimed 40. Matching the declared size to the asset cleared it in both themes.
+- Replaced the header avatar with a supplied photo. Because the source was
+  760×606 and the slot is a 44px circle, cropped it centred to a square and
+  resized to 600×600 rather than letting the face squash.
+- Chased a stale avatar that survived clearing `.next/cache/images`, restarting
+  the dev server, a hard reload, and a fresh tab. Confirmed the server was
+  correct by sampling pixels from `/_next/image` at every srcset width, which
+  located the fault in cache keying: the optimizer keys on path, width, and
+  quality, never on content, so a reused filename serves the old bytes
+  indefinitely. Renamed the file to `owner-photo.jpg`, which fixed it
+  immediately and would also have prevented the same staleness behind a CDN.
+- Renamed the shell from TailAdmin to CRMAdmin after finding the word was not
+  text at all — the template had outlined it into vector paths, leaving nothing
+  to retype. Composed the logo instead from the icon-only mark plus real text in
+  a new `BrandLogo`, which collapsed the light/dark `<Image>` pairs into one
+  element, removed the mismatched dimensions behind the earlier warning, and
+  cleared an LCP warning via `priority`.
+- Credited Maksym Shkilov in the sidebar widget, and in `metadata.description`,
+  which carried the same sentence and would otherwise have drifted from the
+  visible copy.
+- Removed the two wordmark SVGs once nothing referenced them, and verified
+  afterwards that no request 404s.
+- Updated CLAUDE.md, where two entries had gone stale: the deviations list still
+  described a mobile-logo path fix whose code no longer exists, and the assets
+  section still claimed the folder held "the logos and one avatar". Recorded the
+  cache-keying constraint there too, since it cost half an hour to diagnose and
+  nothing in the repo hinted at it.
+- Committed as `3140ed2` and `5d881c8` on `feat/lead-finder-crm`; still no
+  remote configured, so nothing was pushed.
