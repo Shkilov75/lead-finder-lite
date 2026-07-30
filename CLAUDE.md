@@ -64,7 +64,7 @@ These were changed for cause; don't "restore" them by copying the upstream file 
 - `TextArea` gained an `id` prop; without it a `<Label htmlFor>` pointed at nothing and the field had no accessible name.
 - `TableCell` gained `colSpan`, used by the table's loading and empty rows so a single message spans all 7 columns instead of sitting in the first.
 - `TextArea` used `text-gray-400` for its **value**, rendering typed text like placeholder grey. Now `text-gray-800` + `placeholder:text-gray-400`.
-- `AppHeader`'s mobile logo used a relative `./images/...` path, which resolves to `/crm/images/...` on a nested route. Now absolute.
+- Neither `AppHeader` nor `AppSidebar` renders the template's wordmark SVGs any more. Those baked "TailAdmin" into outlined paths — so the name could not be retyped — and each needed a light/dark `<Image>` pair to swap. [src/layout/BrandLogo.tsx](src/layout/BrandLogo.tsx) composes `logo-icon.svg` with real text instead: one element covers both themes, and `showWordmark={false}` gives the collapsed sidebar the mark alone. Rename the brand there, not in an asset.
 - `NotificationDropdown` and `UserDropdown` shipped ~380 lines of fabricated notifications and links to `/profile`, `/signin`, and a support page. Those routes don't exist here, so both were reduced to honest empty/summary states. Don't reintroduce demo content or dead links.
 
 ## Styling — always use Tailwind CSS
@@ -92,5 +92,6 @@ Dark mode is wired up and works. Pair each light style with its dark counterpart
 ## Assets and icons
 
 - SVGs in `src/icons/` are imported as **React components** via `@svgr/webpack`, configured for both webpack and Turbopack in [next.config.ts](next.config.ts). Import from the `@/icons` barrel: `import { TrashBinIcon } from '@/icons'`.
-- `public/images/` holds only the logos and one avatar. The template's other image folders were dropped, so a copied-in template component may reference an image that no longer exists — check before reusing one.
+- `public/images/` holds exactly two files: `logo/logo-icon.svg` (the mark, no wordmark — see `BrandLogo` above) and `user/owner-photo.jpg`. The template's other image folders were dropped, so a copied-in template component may reference an image that no longer exists — check before reusing one.
+- **Swapping an image means renaming the file, not overwriting it.** `/_next/image` keys its cache on path + width + quality, never on content, so the same filename keeps serving the old bytes — clearing `.next/cache/images`, restarting the dev server, hard-reloading, and opening a fresh tab all fail to dislodge it, and in production a CDN would hold it far longer. That is why the avatar is `owner-photo.jpg` rather than the template's `owner.jpg`.
 - `@/*` maps to `./src/*`.
