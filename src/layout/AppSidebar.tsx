@@ -2,11 +2,11 @@
 
 import React from 'react';
 import Link from 'next/link';
-import Image from 'next/image';
 import { usePathname } from 'next/navigation';
 import { useSidebar } from '../context/SidebarContext';
 import { GridIcon, HorizontaLDots, TableIcon } from '../icons/index';
 import SidebarWidget from './SidebarWidget';
+import BrandLogo from './BrandLogo';
 
 type NavItem = {
   name: string;
@@ -40,31 +40,7 @@ const AppSidebar: React.FC = () => {
         }`}
       >
         <Link href="/">
-          {showLabels ? (
-            <>
-              <Image
-                className="dark:hidden"
-                src="/images/logo/logo.svg"
-                alt="Lead Finder Lite"
-                width={150}
-                height={40}
-              />
-              <Image
-                className="hidden dark:block"
-                src="/images/logo/logo-dark.svg"
-                alt="Lead Finder Lite"
-                width={150}
-                height={40}
-              />
-            </>
-          ) : (
-            <Image
-              src="/images/logo/logo-icon.svg"
-              alt="Lead Finder Lite"
-              width={32}
-              height={32}
-            />
-          )}
+          <BrandLogo showWordmark={showLabels} />
         </Link>
       </div>
 

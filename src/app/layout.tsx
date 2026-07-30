@@ -11,7 +11,8 @@ const outfit = Outfit({
 
 export const metadata: Metadata = {
   title: 'Lead Finder Lite',
-  description: 'A minimal CRM built during the vibe-to-live workshop.',
+  description:
+    'A minimal CRM built by Maksym Shkilov during the vibe-to-live workshop.',
 };
 
 /**

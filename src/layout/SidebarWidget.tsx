@@ -7,7 +7,7 @@ export default function SidebarWidget() {
         Lead Finder Lite
       </h3>
       <p className="text-gray-500 text-theme-sm dark:text-gray-400">
-        A minimal CRM built during the vibe-to-live workshop.
+        A minimal CRM built by Maksym Shkilov during the vibe-to-live workshop.
       </p>
     </div>
   );
