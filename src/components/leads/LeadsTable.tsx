@@ -8,7 +8,7 @@ import {
   TableHeader,
   TableRow,
 } from '../ui/table';
-import { TrashBinIcon } from '@/icons';
+import { PencilIcon, TrashBinIcon } from '@/icons';
 import { Lead, useLeads } from '@/context/LeadsContext';
 import { formatLeadDate } from '@/lib/format';
 import StatusPill from './StatusPill';
@@ -29,11 +29,17 @@ type LeadsTableProps = {
   leads: Lead[];
   /** Shown when the list is empty and loading has finished. */
   emptyMessage?: string;
+  /**
+   * Opens an edit form for the row. Omit it and no edit button renders — the
+   * Dashboard's recent-leads list stays a read-only summary.
+   */
+  onEdit?: (lead: Lead) => void;
 };
 
 export default function LeadsTable({
   leads,
   emptyMessage = 'No leads yet — add your first one to get started.',
+  onEdit,
 }: LeadsTableProps) {
   const { isLoaded, advanceStatus, deleteLead } = useLeads();
 
@@ -121,15 +127,28 @@ export default function LeadsTable({
                 </TableCell>
 
                 <TableCell className="px-5 py-4">
-                  <button
-                    type="button"
-                    onClick={() => deleteLead(lead.id)}
-                    title={`Delete ${lead.company}`}
-                    aria-label={`Delete ${lead.company}`}
-                    className="text-gray-400 transition hover:text-error-500 focus:outline-hidden focus-visible:ring-3 focus-visible:ring-error-500/30 rounded-md"
-                  >
-                    <TrashBinIcon />
-                  </button>
+                  <div className="flex items-center gap-3">
+                    {onEdit && (
+                      <button
+                        type="button"
+                        onClick={() => onEdit(lead)}
+                        title={`Edit ${lead.company}`}
+                        aria-label={`Edit ${lead.company}`}
+                        className="text-gray-400 transition hover:text-brand-500 focus:outline-hidden focus-visible:ring-3 focus-visible:ring-brand-500/30 rounded-md"
+                      >
+                        <PencilIcon />
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => deleteLead(lead.id)}
+                      title={`Delete ${lead.company}`}
+                      aria-label={`Delete ${lead.company}`}
+                      className="text-gray-400 transition hover:text-error-500 focus:outline-hidden focus-visible:ring-3 focus-visible:ring-error-500/30 rounded-md"
+                    >
+                      <TrashBinIcon />
+                    </button>
+                  </div>
                 </TableCell>
               </TableRow>
             ))}

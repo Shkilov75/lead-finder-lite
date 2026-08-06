@@ -1,0 +1,5 @@
+# Deliberately three lines. SQLite access uses Python's own `sqlite3` module —
+# there is no ORM here, and the app needs no database driver to install.
+fastapi>=0.118
+uvicorn[standard]>=0.37
+pydantic>=2.12

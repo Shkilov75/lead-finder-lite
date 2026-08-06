@@ -8,13 +8,17 @@ import Input from '../form/input/InputField';
 import TextArea from '../form/input/TextArea';
 import { LeadDraft } from '@/context/LeadsContext';
 
-type AddLeadModalProps = {
+type LeadFormModalProps = {
   isOpen: boolean;
   onClose: () => void;
   onSave: (draft: LeadDraft) => void;
+  /** Drives the heading and the submit label. Defaults to adding. */
+  mode?: 'add' | 'edit';
+  /** Starting values in edit mode. */
+  initialDraft?: LeadDraft;
 };
 
-const EMPTY_DRAFT: LeadDraft = {
+export const EMPTY_DRAFT: LeadDraft = {
   company: '',
   contact: '',
   title: '',
@@ -22,18 +26,59 @@ const EMPTY_DRAFT: LeadDraft = {
   research: '',
 };
 
-export default function AddLeadModal({
+/**
+ * Mirrors the `StringConstraints` on `LeadCreate` in `backend/app/schemas.py`.
+ * Enforcing them here is what stops the form from cheerfully accepting a long
+ * paste, closing, and only then getting a 422 back with the text gone.
+ */
+const MAX_LENGTH: Record<keyof LeadDraft, number> = {
+  company: 200,
+  contact: 200,
+  title: 200,
+  notes: 500,
+  research: 5000,
+};
+
+const COPY = {
+  add: {
+    heading: 'Add lead',
+    blurb:
+      'Company and contact are required. Everything else can be filled in later.',
+    submit: 'Save lead',
+  },
+  edit: {
+    heading: 'Edit lead',
+    blurb: 'Update any field. Company and contact still have to be filled in.',
+    submit: 'Save changes',
+  },
+} as const;
+
+/**
+ * One form for both adding and editing.
+ *
+ * The fields are fully controlled. They used to be a mix — text inputs on
+ * `defaultValue`, the textarea on `value` — which worked only because the modal
+ * always opened blank; prefilling for an edit needs `value` throughout.
+ *
+ * `useState(initialDraft)` only initialises once per mount, and `Modal` unmounts
+ * its children rather than this component — so callers must pass a `key` that
+ * changes on **every open**, not just when the target lead changes. Keying on
+ * the lead id alone leaves stale text in the fields when the same row is edited
+ * twice in a row, and saving then writes the first edit back over the second.
+ */
+export default function LeadFormModal({
   isOpen,
   onClose,
   onSave,
-}: AddLeadModalProps) {
-  const [draft, setDraft] = useState<LeadDraft>(EMPTY_DRAFT);
+  mode = 'add',
+  initialDraft = EMPTY_DRAFT,
+}: LeadFormModalProps) {
+  const [draft, setDraft] = useState<LeadDraft>(initialDraft);
   const [showErrors, setShowErrors] = useState(false);
+  const copy = COPY[mode];
 
-  // Modal unmounts its children when closed, so the inputs remount blank on the
-  // next open; this only has to reset the state that lives out here.
   const reset = () => {
-    setDraft(EMPTY_DRAFT);
+    setDraft(initialDraft);
     setShowErrors(false);
   };
 
@@ -51,6 +96,8 @@ export default function AddLeadModal({
   const handleSubmit = (event: React.FormEvent) => {
     event.preventDefault();
 
+    // The API enforces this too — this half is only here so the message appears
+    // instantly, without a round trip.
     if (missingCompany || missingContact) {
       setShowErrors(true);
       return;
@@ -75,11 +122,10 @@ export default function AddLeadModal({
     >
       <form onSubmit={handleSubmit} className="p-6 sm:p-8">
         <h4 className="mb-1 text-xl font-semibold text-gray-800 dark:text-white/90">
-          Add lead
+          {copy.heading}
         </h4>
         <p className="mb-6 text-gray-500 text-theme-sm dark:text-gray-400">
-          Company and contact are required. Everything else can be filled in
-          later.
+          {copy.blurb}
         </p>
 
         <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
@@ -88,7 +134,8 @@ export default function AddLeadModal({
             <Input
               id="company"
               placeholder="Acme Corp"
-              defaultValue={draft.company}
+              maxLength={MAX_LENGTH.company}
+              value={draft.company}
               onChange={(e) => set('company')(e.target.value)}
               error={showErrors && missingCompany}
               hint={
@@ -102,7 +149,8 @@ export default function AddLeadModal({
             <Input
               id="contact"
               placeholder="Jane Rivera"
-              defaultValue={draft.contact}
+              maxLength={MAX_LENGTH.contact}
+              value={draft.contact}
               onChange={(e) => set('contact')(e.target.value)}
               error={showErrors && missingContact}
               hint={
@@ -116,7 +164,8 @@ export default function AddLeadModal({
             <Input
               id="title"
               placeholder="VP of Sales"
-              defaultValue={draft.title}
+              maxLength={MAX_LENGTH.title}
+              value={draft.title}
               onChange={(e) => set('title')(e.target.value)}
             />
           </div>
@@ -126,7 +175,8 @@ export default function AddLeadModal({
             <Input
               id="notes"
               placeholder="Met at SaaStr, interested in Q3 rollout"
-              defaultValue={draft.notes}
+              maxLength={MAX_LENGTH.notes}
+              value={draft.notes}
               onChange={(e) => set('notes')(e.target.value)}
             />
           </div>
@@ -137,6 +187,7 @@ export default function AddLeadModal({
               id="research"
               rows={4}
               placeholder="Paste whatever you found — funding, headcount, tools they use…"
+              maxLength={MAX_LENGTH.research}
               value={draft.research}
               onChange={set('research')}
             />
@@ -148,7 +199,7 @@ export default function AddLeadModal({
             Cancel
           </Button>
           <Button type="submit" size="sm">
-            Save lead
+            {copy.submit}
           </Button>
         </div>
       </form>

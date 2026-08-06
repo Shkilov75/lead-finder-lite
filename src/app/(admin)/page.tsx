@@ -4,6 +4,7 @@ import React, { useMemo } from 'react';
 import Link from 'next/link';
 import PageBreadcrumb from '@/components/common/PageBreadCrumb';
 import LeadStats from '@/components/leads/LeadStats';
+import LeadsErrorBanner from '@/components/leads/LeadsErrorBanner';
 import LeadsTable from '@/components/leads/LeadsTable';
 import { useLeads } from '@/context/LeadsContext';
 
@@ -23,6 +24,8 @@ export default function DashboardPage() {
   return (
     <div>
       <PageBreadcrumb pageTitle="Dashboard" />
+
+      <LeadsErrorBanner />
 
       <LeadStats />
 

@@ -9,7 +9,7 @@ function StatCard({
   value,
 }: {
   label: React.ReactNode;
-  value: number;
+  value: React.ReactNode;
 }) {
   return (
     <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-white/[0.03] md:p-6">
@@ -22,7 +22,16 @@ function StatCard({
 }
 
 export default function LeadStats() {
-  const { leads, counts } = useLeads();
+  const { leads, counts, isLoaded } = useLeads();
+
+  // A dash rather than a zero while the list is in flight: the counts now come
+  // over the network, and "0 leads" is a claim the app can't make yet.
+  const show = (value: number) =>
+    isLoaded ? (
+      value
+    ) : (
+      <span className="text-gray-400 dark:text-gray-500">—</span>
+    );
 
   return (
     <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:gap-6 lg:grid-cols-5">
@@ -32,13 +41,13 @@ export default function LeadStats() {
             Total leads
           </span>
         }
-        value={leads.length}
+        value={show(leads.length)}
       />
       {LEAD_STATUSES.map((status) => (
         <StatCard
           key={status}
           label={<StatusPill status={status} />}
-          value={counts[status]}
+          value={show(counts[status])}
         />
       ))}
     </div>
