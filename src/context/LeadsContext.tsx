@@ -6,12 +6,20 @@ import React, {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from 'react';
+import { ApiError, leadsApi, type LeadPatch } from '@/lib/api';
 
 /**
  * The pipeline, in order. Statuses advance left to right and wrap back to the
  * start, so a mis-click can always be corrected by clicking around again.
+ *
+ * The server holds the same order twice over — as `LEAD_STATUSES` in
+ * `backend/app/db.py` (which also becomes the table's CHECK constraint) and as
+ * `NEXT_STATUS` in `backend/app/repository.py`. Advancing is a server decision;
+ * `nextStatus` below only predicts it, for the optimistic update and the badge's
+ * tooltip.
  */
 export const LEAD_STATUSES = ['New', 'Contacted', 'Replied', 'Closed'] as const;
 
@@ -33,140 +41,50 @@ export type Lead = {
 
 export type LeadDraft = Omit<Lead, 'id' | 'status' | 'createdAt'>;
 
-const STORAGE_KEY = 'lead-finder-lite:leads';
-
-const SEED_LEADS: Lead[] = [
-  {
-    id: 'seed-acme',
-    company: 'Acme Corp',
-    contact: 'Jane Rivera',
-    title: 'VP of Sales',
-    notes: 'Met at SaaStr, interested in Q3 rollout',
-    research: 'Series B, ~120 employees, uses HubSpot today',
-    status: 'Contacted',
-    createdAt: '2026-07-20',
-  },
-  {
-    id: 'seed-northwind',
-    company: 'Northwind Traders',
-    contact: 'Sam Okafor',
-    title: 'Head of Ops',
-    notes: 'Cold outreach via LinkedIn',
-    research: '',
-    status: 'New',
-    createdAt: '2026-07-24',
-  },
-  {
-    id: 'seed-globex',
-    company: 'Globex',
-    contact: 'Priya Nair',
-    title: 'Director of Growth',
-    notes: 'Replied asking for pricing',
-    research: 'Recently raised Series A, hiring 3 SDRs',
-    status: 'Replied',
-    createdAt: '2026-07-15',
-  },
-];
-
 export function nextStatus(status: LeadStatus): LeadStatus {
   const index = LEAD_STATUSES.indexOf(status);
   return LEAD_STATUSES[(index + 1) % LEAD_STATUSES.length];
 }
 
-function isLead(value: unknown): value is Lead {
-  if (typeof value !== 'object' || value === null) return false;
-  const lead = value as Record<string, unknown>;
-  return (
-    typeof lead.id === 'string' &&
-    typeof lead.company === 'string' &&
-    typeof lead.contact === 'string' &&
-    typeof lead.title === 'string' &&
-    typeof lead.notes === 'string' &&
-    typeof lead.research === 'string' &&
-    typeof lead.createdAt === 'string' &&
-    LEAD_STATUSES.includes(lead.status as LeadStatus)
-  );
-}
-
 /**
- * Why this is a tagged union rather than `Lead[] | null`: "nothing saved yet"
- * and "saved, but the rows no longer validate" both used to collapse to an
- * empty array. The seed fallback then couldn't fire, and the persist effect
- * overwrote the stored value with `[]` — deleting every saved lead. Adding a
- * required field to `Lead` and `isLead` was enough to trigger it, which is the
- * first thing the README tells a contributor to do.
- *
- * A legitimately empty list still has to stay empty: deleting your last lead
- * and reloading must not re-seed the examples. Only `missing` seeds.
+ * Prefix for the placeholder row an optimistic `addLead` shows while the POST is
+ * still in flight. The server has never heard of that id, so the other mutations
+ * refuse to act on it rather than sending a request that can only 404.
  */
-type StoredLeads =
-  | { kind: 'missing' }
-  | { kind: 'unreadable'; raw: string }
-  | { kind: 'ok'; leads: Lead[]; dropped: number; raw: string };
+const TEMP_PREFIX = 'temp-';
 
-function readStoredLeads(): StoredLeads {
-  let raw: string | null = null;
-  try {
-    raw = window.localStorage.getItem(STORAGE_KEY);
-  } catch {
-    return { kind: 'missing' };
-  }
-  if (!raw) return { kind: 'missing' };
-
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return { kind: 'unreadable', raw };
-    const leads = parsed.filter(isLead);
-    return { kind: 'ok', leads, dropped: parsed.length - leads.length, raw };
-  } catch {
-    return { kind: 'unreadable', raw };
-  }
+function tempId(): string {
+  const suffix =
+    typeof crypto !== 'undefined' && 'randomUUID' in crypto
+      ? crypto.randomUUID()
+      : String(Date.now());
+  return `${TEMP_PREFIX}${suffix}`;
 }
 
-/**
- * Copies the previous stored value aside before anything overwrites it, so a
- * shape change or hand-edit is recoverable instead of silently destructive.
- */
-function backupRawLeads(raw: string, reason: string) {
-  const key = `${STORAGE_KEY}:backup`;
-  try {
-    window.localStorage.setItem(key, raw);
-    console.warn(
-      `[lead-finder-lite] ${reason}. Previous value copied to "${key}".`,
-    );
-  } catch {
-    console.warn(
-      `[lead-finder-lite] ${reason}, and the backup could not be written. Previous value: ${raw}`,
-    );
-  }
+function isTempId(id: string): boolean {
+  return id.startsWith(TEMP_PREFIX);
 }
 
-function resolveInitialLeads(stored: StoredLeads): Lead[] {
-  switch (stored.kind) {
-    case 'missing':
-      return SEED_LEADS;
-    case 'unreadable':
-      backupRawLeads(stored.raw, 'Stored leads could not be parsed');
-      return SEED_LEADS;
-    case 'ok':
-      if (stored.dropped > 0) {
-        backupRawLeads(
-          stored.raw,
-          `${stored.dropped} stored lead(s) did not match the current shape and were dropped`,
-        );
-      }
-      return stored.leads;
-  }
+function messageFor(error: unknown, fallback: string): string {
+  if (error instanceof ApiError) return error.message;
+  return fallback;
 }
 
 type LeadsContextType = {
   leads: Lead[];
-  /** False until localStorage has been read on the client. */
+  /** False until the first load from the API has settled, succeed or fail. */
   isLoaded: boolean;
   counts: Record<LeadStatus, number>;
-  addLead: (draft: LeadDraft) => void;
-  advanceStatus: (id: string) => void;
-  deleteLead: (id: string) => void;
+  /** Last failure, for the banner. Null when everything is fine. */
+  error: string | null;
+  /** Resolves false if the save failed, so the form can hand the draft back. */
+  addLead: (draft: LeadDraft) => Promise<boolean>;
+  updateLead: (id: string, patch: LeadPatch) => Promise<boolean>;
+  advanceStatus: (id: string) => Promise<void>;
+  deleteLead: (id: string) => Promise<void>;
+  /** Re-reads the list from the API — what the banner's Retry button calls. */
+  refresh: () => Promise<void>;
+  dismissError: () => void;
 };
 
 const LeadsContext = createContext<LeadsContextType | undefined>(undefined);
@@ -175,55 +93,228 @@ export const LeadsProvider: React.FC<{ children: React.ReactNode }> = ({
   children,
 }) => {
   // Starts empty so the server-rendered markup matches the first client render;
-  // the real list arrives from localStorage in the effect below.
+  // the real list arrives from the API in the effect below.
   const [leads, setLeads] = useState<Lead[]>([]);
   const [isLoaded, setIsLoaded] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
+  // Mirrors `leads` for the mutation handlers. Each one needs the row exactly as
+  // it was before its optimistic edit, so it can put that row back if the request
+  // fails — and reading it from here keeps the `setLeads` updaters pure, which
+  // capturing it inside an updater would not.
+  const leadsRef = useRef<Lead[]>([]);
   useEffect(() => {
-    // localStorage can only be read on the client. Doing it in a lazy useState
-    // initializer instead would make the first client render disagree with the
-    // server-rendered HTML and trip a hydration error, so the read has to
-    // happen here — the one case react-hooks/set-state-in-effect can't model.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setLeads(resolveInitialLeads(readStoredLeads()));
-    setIsLoaded(true);
+    leadsRef.current = leads;
+  }, [leads]);
+
+  /**
+   * In-flight mutations, per row.
+   *
+   * Two clicks on the same status badge start two requests, and they can answer
+   * out of order — applying whichever lands last would leave the table a step
+   * behind the database. So each request takes a sequence number and only the
+   * newest one for that row is allowed to touch it.
+   *
+   * `baseline` is the row as it stood before the first request of the burst,
+   * which is what a failure has to restore: the row currently on screen already
+   * carries the optimistic edits being rolled back.
+   */
+  const rowRequests = useRef(
+    new Map<string, { latest: number; inFlight: number; baseline: Lead }>(),
+  );
+
+  const beginRowRequest = useCallback((id: string, current: Lead): number => {
+    const entry = rowRequests.current.get(id);
+    if (!entry) {
+      rowRequests.current.set(id, { latest: 1, inFlight: 1, baseline: current });
+      return 1;
+    }
+    entry.latest += 1;
+    entry.inFlight += 1;
+    return entry.latest;
+  }, []);
+
+  const endRowRequest = useCallback(
+    (id: string, seq: number): { isLatest: boolean; baseline: Lead } | null => {
+      const entry = rowRequests.current.get(id);
+      if (!entry) return null;
+
+      const result = { isLatest: seq === entry.latest, baseline: entry.baseline };
+      entry.inFlight -= 1;
+      // The baseline has to outlive the stragglers, so it is only dropped once
+      // every request for the row has settled.
+      if (entry.inFlight <= 0) rowRequests.current.delete(id);
+      return result;
+    },
+    [],
+  );
+
+  const load = useCallback(async () => {
+    try {
+      const fetched = await leadsApi.list();
+      setLeads(fetched);
+      setError(null);
+    } catch (cause) {
+      setError(messageFor(cause, 'Could not load leads.'));
+    } finally {
+      // Set even on failure: leaving this false would strand the table on
+      // "Loading leads…" forever with no way to say what went wrong.
+      setIsLoaded(true);
+    }
   }, []);
 
   useEffect(() => {
-    if (!isLoaded) return;
-    try {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(leads));
-    } catch {
-      // Storage can be full or blocked (private mode) — the app still works
-      // for this session, it just won't survive a reload.
-    }
-  }, [leads, isLoaded]);
+    // The API can only be called from the client. Doing it in a lazy useState
+    // initializer instead would be both impossible (it is async) and wrong, so
+    // the read has to happen here — the one case the lint rule can't model.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void load();
+  }, [load]);
 
-  const addLead = useCallback((draft: LeadDraft) => {
-    const lead: Lead = {
+  const addLead = useCallback(async (draft: LeadDraft) => {
+    const placeholder: Lead = {
       ...draft,
-      id:
-        typeof crypto !== 'undefined' && 'randomUUID' in crypto
-          ? crypto.randomUUID()
-          : `lead-${Date.now()}`,
+      id: tempId(),
       status: 'New',
       createdAt: new Date().toISOString().slice(0, 10),
     };
+
     // Newest first so a freshly added lead is visible without scrolling.
-    setLeads((prev) => [lead, ...prev]);
+    setLeads((prev) => [placeholder, ...prev]);
+
+    try {
+      const saved = await leadsApi.create(draft);
+      // Swap the placeholder for the server's row — same position, real id.
+      setLeads((prev) =>
+        prev.map((lead) => (lead.id === placeholder.id ? saved : lead)),
+      );
+      setError(null);
+      return true;
+    } catch (cause) {
+      setLeads((prev) => prev.filter((lead) => lead.id !== placeholder.id));
+      setError(messageFor(cause, 'Could not save the lead.'));
+      return false;
+    }
   }, []);
 
-  const advanceStatus = useCallback((id: string) => {
-    setLeads((prev) =>
-      prev.map((lead) =>
-        lead.id === id ? { ...lead, status: nextStatus(lead.status) } : lead,
-      ),
-    );
-  }, []);
+  const updateLead = useCallback(
+    async (id: string, patch: LeadPatch) => {
+      if (isTempId(id)) {
+        setError('That lead is still being saved. Try again in a moment.');
+        return false;
+      }
 
-  const deleteLead = useCallback((id: string) => {
+      const current = leadsRef.current.find((lead) => lead.id === id);
+      if (!current) return false;
+
+      const seq = beginRowRequest(id, current);
+      setLeads((prev) =>
+        prev.map((lead) => (lead.id === id ? { ...lead, ...patch } : lead)),
+      );
+
+      try {
+        const saved = await leadsApi.update(id, patch);
+        if (endRowRequest(id, seq)?.isLatest) {
+          setLeads((prev) => prev.map((lead) => (lead.id === id ? saved : lead)));
+          setError(null);
+        }
+        return true;
+      } catch (cause) {
+        const settled = endRowRequest(id, seq);
+        if (settled?.isLatest) {
+          // Only the fields this patch touched go back. Restoring the whole row
+          // would also undo a status advance that succeeded in the meantime.
+          const reverted = Object.fromEntries(
+            Object.keys(patch).map((field) => [
+              field,
+              settled.baseline[field as keyof Lead],
+            ]),
+          ) as Partial<Lead>;
+          setLeads((prev) =>
+            prev.map((lead) => (lead.id === id ? { ...lead, ...reverted } : lead)),
+          );
+        }
+        setError(messageFor(cause, 'Could not save the changes.'));
+        return false;
+      }
+    },
+    [beginRowRequest, endRowRequest],
+  );
+
+  const advanceStatus = useCallback(
+    async (id: string) => {
+      if (isTempId(id)) {
+        setError('That lead is still being saved. Try again in a moment.');
+        return;
+      }
+
+      const current = leadsRef.current.find((lead) => lead.id === id);
+      if (!current) return;
+
+      const seq = beginRowRequest(id, current);
+      setLeads((prev) =>
+        prev.map((lead) =>
+          lead.id === id ? { ...lead, status: nextStatus(lead.status) } : lead,
+        ),
+      );
+
+      try {
+        const saved = await leadsApi.advance(id);
+        if (endRowRequest(id, seq)?.isLatest) {
+          setLeads((prev) => prev.map((lead) => (lead.id === id ? saved : lead)));
+          setError(null);
+        }
+      } catch (cause) {
+        const settled = endRowRequest(id, seq);
+        if (settled?.isLatest) {
+          setLeads((prev) =>
+            prev.map((lead) =>
+              lead.id === id
+                ? { ...lead, status: settled.baseline.status }
+                : lead,
+            ),
+          );
+        }
+        setError(messageFor(cause, 'Could not move the lead along.'));
+      }
+    },
+    [beginRowRequest, endRowRequest],
+  );
+
+  const deleteLead = useCallback(async (id: string) => {
+    if (isTempId(id)) {
+      setError('That lead is still being saved. Try again in a moment.');
+      return;
+    }
+
+    const index = leadsRef.current.findIndex((lead) => lead.id === id);
+    if (index === -1) return;
+    const removed = leadsRef.current[index];
+    // The row that followed it. An id survives the list changing underneath us;
+    // a numeric index captured now would put the row back in the wrong place.
+    const anchorId = leadsRef.current[index + 1]?.id ?? null;
+
     setLeads((prev) => prev.filter((lead) => lead.id !== id));
+
+    try {
+      await leadsApi.remove(id);
+      setError(null);
+    } catch (cause) {
+      // Back to where it was, not to the top — the row should reappear under
+      // the cursor that tried to delete it.
+      setLeads((prev) => {
+        if (prev.some((lead) => lead.id === id)) return prev;
+        const anchor = anchorId
+          ? prev.findIndex((lead) => lead.id === anchorId)
+          : -1;
+        const at = anchor === -1 ? prev.length : anchor;
+        return [...prev.slice(0, at), removed, ...prev.slice(at)];
+      });
+      setError(messageFor(cause, 'Could not delete the lead.'));
+    }
   }, []);
+
+  const dismissError = useCallback(() => setError(null), []);
 
   const counts = useMemo(() => {
     const initial = Object.fromEntries(
@@ -236,8 +327,30 @@ export const LeadsProvider: React.FC<{ children: React.ReactNode }> = ({
   }, [leads]);
 
   const value = useMemo(
-    () => ({ leads, isLoaded, counts, addLead, advanceStatus, deleteLead }),
-    [leads, isLoaded, counts, addLead, advanceStatus, deleteLead],
+    () => ({
+      leads,
+      isLoaded,
+      counts,
+      error,
+      addLead,
+      updateLead,
+      advanceStatus,
+      deleteLead,
+      refresh: load,
+      dismissError,
+    }),
+    [
+      leads,
+      isLoaded,
+      counts,
+      error,
+      addLead,
+      updateLead,
+      advanceStatus,
+      deleteLead,
+      load,
+      dismissError,
+    ],
   );
 
   return (

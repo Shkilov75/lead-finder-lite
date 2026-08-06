@@ -4,25 +4,31 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-**Lead Finder Lite** — a deliberately minimal CRM built for a "vibe-to-live" workshop. Four capabilities, nothing more:
+**Lead Finder Lite** — a deliberately minimal CRM built for a "vibe-to-live" workshop. Five capabilities, nothing more:
 
 1. Add a lead (company, contact, title, one-line notes)
 2. View leads in a table with a status pipeline
-3. Advance status by clicking the badge: `New → Contacted → Replied → Closed`
-4. A **research notes** field that students paste findings into **by hand**
+3. Edit a lead from its row in the CRM table
+4. Advance status by clicking the badge: `New → Contacted → Replied → Closed`
+5. A **research notes** field that students paste findings into **by hand**
 
-There is **no scraping, enrichment, or external API call anywhere**, and that is a deliberate product constraint, not an unfinished edge — it keeps the class demo free and safe to run. Do not add live lookup, enrichment, or a data-provider integration unless explicitly asked. The original guide's 5-skill chain (ICP Builder → Prospect Finder → Company Spy → Message Crafter → Follow-Up Sequencer) is a post-workshop stretch goal, not the current scope.
+There is **no scraping, enrichment, or third-party data provider anywhere**, and that is a deliberate product constraint, not an unfinished edge — it keeps the class demo free and safe to run. Do not add live lookup, enrichment, or a data-provider integration unless explicitly asked. (The app's *own* FastAPI backend is not an exception to this — the rule is about pulling in outside data.) The original guide's 5-skill chain (ICP Builder → Prospect Finder → Company Spy → Message Crafter → Follow-Up Sequencer) is a post-workshop stretch goal, not the current scope.
 
 ## Commands
 
+Two processes. The web app is useless without the API — every lead read and write goes through it.
+
 ```bash
 npm run dev      # Next.js dev server (Turbopack) on :3000
+npm run dev:api  # FastAPI via backend/.venv on :8000
 npm run build    # production build; also runs the TypeScript check
 npm run start    # serve the production build
 npm run lint     # eslint (eslint-config-next)
 ```
 
-There is **no test runner installed** — don't assume `npm test` exists. `npm run build` is the type-check gate.
+First-time backend setup: `cd backend && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt`.
+
+There is **no test runner installed** on either side — don't assume `npm test` or `pytest` exists. `npm run build` is the type-check gate for the frontend; for the backend, `curl` against a running `uvicorn` (or `/docs`) is the check.
 
 ## Architecture
 
@@ -33,18 +39,36 @@ Built on the **TailAdmin free Next.js template**, trimmed to just this app. Stac
 Two pages, both `'use client'` because they read lead state from context:
 
 - `src/app/(admin)/page.tsx` — Dashboard: stat cards + 5 most recent leads
-- `src/app/(admin)/crm/page.tsx` — CRM: full table + Add lead modal
+- `src/app/(admin)/crm/page.tsx` — CRM: full table + the add/edit modal
+
+`/api/*` is **not** a Next.js route — there are no route handlers and no server actions. [next.config.ts](next.config.ts) rewrites it to the FastAPI app at `BACKEND_ORIGIN` (default `http://localhost:8000`), so the browser only ever makes same-origin requests and no API URL reaches the client bundle.
 
 The `(admin)` route group owns the chrome. [src/app/(admin)/layout.tsx](src/app/(admin)/layout.tsx) composes `AppSidebar` + `AppHeader` + `Backdrop` and computes the main content's left margin from sidebar state — so a new page dropped into `(admin)/` inherits the shell with no wiring. [src/app/layout.tsx](src/app/layout.tsx) holds the three providers: `ThemeProvider` → `SidebarProvider` → `LeadsProvider`.
 
-### Lead state
+### Backend
 
-[src/context/LeadsContext.tsx](src/context/LeadsContext.tsx) is the single source of truth — all lead data and every mutation. There is no backend and no server state.
+[backend/](backend/) — FastAPI over a SQLite file, mounted at `/api`. Stdlib `sqlite3`, **no ORM**; `backend/README.md` has the endpoint table. Layers: `config` → `db` → `schemas` → `repository` → `routers/leads` → `main`.
 
-- **Persistence is `localStorage`** under `lead-finder-lite:leads`. First visit seeds three example leads.
-- **`isLoaded` is not decoration.** `localStorage` is client-only, so state starts empty and hydrates in an effect; reading it in a `useState` initializer instead would make the first client render disagree with the prerendered HTML and trip a hydration error. Components must render a loading branch while `isLoaded` is false rather than assuming an empty list means "no leads". This is also why both context files carry a targeted `eslint-disable` for `react-hooks/set-state-in-effect` — that rule cannot model the hydration constraint.
-- `readStoredLeads` returns a **tagged union** (`missing` | `unreadable` | `ok`), not `Lead[] | null`, and that distinction is load-bearing. It previously returned a filtered array, so "nothing saved yet" and "saved, but no row validates" both collapsed to `[]`: the seed fallback couldn't fire and the persist effect immediately overwrote storage with `[]`, destroying every saved lead. Adding a required field to `Lead` + `isLead` — step one in the README's stretch goals — was enough to trigger it. **Only `missing` seeds**, so deleting your last lead and reloading correctly stays empty instead of re-seeding, and anything unparseable or partially invalid is copied to `lead-finder-lite:leads:backup` with a `console.warn` before being replaced. Preserve those two properties when touching this code.
+- **All SQL lives in `repository.py`.** Everything is parameterised with `?`; the one place a column name varies at runtime (`update_lead`) picks it from the `UPDATABLE_COLUMNS` whitelist, never from the request body.
+- **One connection per request**, via the `get_conn` dependency. Endpoints are sync `def` on purpose — FastAPI runs those in a threadpool, where blocking `sqlite3` calls are harmless; `async def` would block the event loop. A module-level connection would then be several requests deep at once, so don't hoist it.
+- **`check_same_thread=False` is load-bearing, not a shortcut.** FastAPI runs a sync generator dependency and its endpoint in *different* threadpool threads, so the connection `get_conn` opens is always used from a thread other than the one that created it. Without the flag every overlapping request raises `ProgrammingError` — and sequential testing won't reveal it, because anyio hands out the same idle worker twice. The flag only disables sqlite3's guard against *sharing* a connection; per-request construction is what actually keeps this safe.
+- **`advance_status` picks the next status inside the `UPDATE`**, via a parameterised `CASE`. Reading the row and writing the successor back would need an explicit `BEGIN IMMEDIATE` — a bare `SELECT` starts no transaction, so two clicks arriving together would both read the same status and one would be lost.
+- **Seeding fires only when the `leads` table did not exist**, checked against `sqlite_master` before `CREATE TABLE` — never merely when the table is empty. This is the same trap the old `localStorage` code hit: seeding an empty table resurrects the three examples every time someone deletes their last lead and restarts. Preserve it.
+- `created_at` is stored as a **full ISO timestamp** but serialised as `yyyy-mm-dd`. The time component only exists so `ORDER BY created_at DESC` is stable — with dates alone, leads added the same day come back in arbitrary order. The date alone is what `formatLeadDate` parses.
+- `LeadOut` uses `alias_generator=to_camel`, so responses match the TS `Lead` type field for field. That is why `src/lib/api.ts` is a fetch wrapper with **no renaming layer** — keep it that way.
+- The pipeline order is spelled out in `db.LEAD_STATUSES` (which builds the table's `CHECK` constraint), `repository.NEXT_STATUS`, and `schemas.LeadStatus`; a module-level `assert` in `schemas.py` holds the last two together. Advancing is a **server** decision — the client's `nextStatus` only predicts it.
+
+### Lead state (frontend)
+
+[src/context/LeadsContext.tsx](src/context/LeadsContext.tsx) owns the client-side view of the data and every mutation. The source of truth is the database; this is a cache of it. [src/lib/api.ts](src/lib/api.ts) is the only module that calls `fetch`.
+
+- **`isLoaded` is not decoration.** State starts empty so the prerendered HTML matches the first client render, then the list arrives from the API in an effect. It is set to `true` **even when the load fails**, or the table would sit on "Loading leads…" forever with nothing to explain why. Components must render a loading branch rather than assuming an empty list means "no leads". This is also why the file carries a targeted `eslint-disable` for `react-hooks/set-state-in-effect`.
+- **Mutations are optimistic with rollback.** Apply locally → send → replace the row with the server's response, or restore and set `error`. Properties to preserve: rollback addresses rows **by id inside functional `setLeads` updaters**, and previous values are read from `leadsRef` rather than captured inside an updater (updaters must stay pure).
+- **Concurrent edits to one row are sequenced.** `rowRequests` gives each in-flight mutation a number, and only the newest response for a row may touch it — otherwise a double-clicked badge whose responses arrive out of order leaves the table a step behind the database. Its `baseline` is the row before the *first* request of a burst, which is what a failure must restore; the row on screen already carries the optimistic edits being undone. `updateLead` rolls back **only the fields its patch touched**, so it can't undo a status advance that succeeded meanwhile.
+- **`deleteLead` restores by anchor, not index**: it remembers the id of the row that followed, because a numeric index captured before the request goes stale if the list changes underneath it.
+- **Temp ids.** `addLead` shows a placeholder row with a `temp-` id while the POST is in flight. The other mutations refuse `temp-` ids with a message — the server has never heard of them, so a request could only 404.
 - `nextStatus` wraps `Closed → New` on purpose: clicking is the only way to change status, so wrapping is what makes a mis-click recoverable.
+- Network failures surface through `LeadsErrorBanner`, rendered on both pages. Without it, a rolled-back optimistic update just looks like the click not registering.
 
 ### Component layers
 
@@ -53,7 +77,13 @@ Distinguish the two, because they have different rules:
 - `src/components/leads/*` — **this app's** components. Edit freely.
 - `src/components/ui/*`, `src/components/form/*`, `src/layout/*`, `src/components/common/*` — **template** components. Prefer composing over rewriting: `StatusPill` wraps `Badge` rather than restyling a pill from scratch, which keeps one source of truth for pill styling.
 
-`LeadsTable` is shared by both pages — the Dashboard passes a sliced list. Status colours live in one map in [src/components/leads/StatusPill.tsx](src/components/leads/StatusPill.tsx).
+`LeadsTable` is shared by both pages — the Dashboard passes a sliced list, and omits `onEdit` so no pencil button renders there. Status colours live in one map in [src/components/leads/StatusPill.tsx](src/components/leads/StatusPill.tsx).
+
+`LeadFormModal` serves both adding and editing. Its fields are **fully controlled**, and capped with `MAX_LENGTH`, which mirrors the `StringConstraints` in `backend/app/schemas.py` — without that, a long paste is accepted, the modal closes, and only then does the API 422.
+
+`useState(initialDraft)` initialises once per mount and `Modal` unmounts its children rather than the form component, so the CRM page keys the form on a **counter bumped on every open**. Keying on the lead id would not change when the same row is edited twice in a row, leaving stale text in the fields — and saving would then write the first edit back over the second.
+
+Saving is fire-and-close, so a failed request would take the typed draft with it. `addLead`/`updateLead` therefore resolve to a boolean, and the CRM page reopens the form holding the same draft when one resolves false.
 
 ### Deviations from the template worth knowing
 
@@ -62,6 +92,7 @@ These were changed for cause; don't "restore" them by copying the upstream file 
 - `Button` gained a `type` prop defaulting to `"button"` — without it, a Cancel button inside a `<form>` submits it.
 - `AppHeader`'s search `<form>` has no action and no handler, so **any** submit — Enter in the field, or the decorative ⌘K keycap, which defaulted to `type="submit"` — fired a native GET navigation that reloaded the page and discarded React state. It now calls `preventDefault`, and the keycap is `type="button"`.
 - `TextArea` gained an `id` prop; without it a `<Label htmlFor>` pointed at nothing and the field had no accessible name.
+- `Input` gained a `value` prop. It shipped with `defaultValue` only, so a field could never start with anything in it — `LeadFormModal` needs controlled inputs to prefill an edit. `value` and `defaultValue` are spread conditionally so React never sees both.
 - `TableCell` gained `colSpan`, used by the table's loading and empty rows so a single message spans all 7 columns instead of sitting in the first.
 - `TextArea` used `text-gray-400` for its **value**, rendering typed text like placeholder grey. Now `text-gray-800` + `placeholder:text-gray-400`.
 - Neither `AppHeader` nor `AppSidebar` renders the template's wordmark SVGs any more. Those baked "TailAdmin" into outlined paths — so the name could not be retyped — and each needed a light/dark `<Image>` pair to swap. [src/layout/BrandLogo.tsx](src/layout/BrandLogo.tsx) composes `logo-icon.svg` with real text instead: one element covers both themes, and `showWordmark={false}` gives the collapsed sidebar the mark alone. Rename the brand there, not in an asset.

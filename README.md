@@ -1,12 +1,14 @@
 # Lead Finder Lite
 
 A minimal CRM-style tool built during the vibe-to-live workshop, on top of the
-[TailAdmin free Next.js template](https://github.com/TailAdmin/free-nextjs-admin-dashboard).
+[TailAdmin free Next.js template](https://github.com/TailAdmin/free-nextjs-admin-dashboard),
+with a FastAPI + SQLite backend.
 
 ## What it does
 
 - **Add a lead** — company name, contact name, title, one-line notes
 - **View leads** — a table showing the pipeline status of each lead
+- **Edit a lead** — the pencil button on a CRM row reopens the form
 - **Update status** — click a status badge to move the lead along
   `New → Contacted → Replied → Closed` (it wraps back to `New`, so a mis-click
   is easy to undo)
@@ -16,29 +18,47 @@ Research notes are **filled in by hand**. There is no scraping and no
 enrichment API, which keeps the workshop demo free to run and safe to demo
 live.
 
-Leads are stored in your browser's `localStorage`, so they survive a reload but
-stay on your machine. Clearing site data resets to the three example leads.
+Leads live in a SQLite file at `backend/data/leads.db`, served by the FastAPI
+app in [`backend/`](backend/). The database is created and seeded with three
+example leads the first time the API starts; delete the file to start over.
 
 ## Getting started
 
+Two processes: the Next.js app and the API. Run them in separate terminals.
+
 ```bash
+# terminal 1 — API
+cd backend
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/uvicorn app.main:app --reload --port 8000
+
+# terminal 2 — web app
 npm install
 npm run dev      # http://localhost:3000
 ```
 
+The browser only ever talks to `localhost:3000`: `next.config.ts` rewrites
+`/api/*` through to the API, so nothing is cross-origin and no API URL ends up
+in the client bundle.
+
 | Command | What it does |
 | --- | --- |
-| `npm run dev` | Dev server with hot reload |
+| `npm run dev` | Next.js dev server with hot reload |
+| `npm run dev:api` | The API, via the venv in `backend/` |
 | `npm run build` | Production build (also type-checks) |
 | `npm run start` | Serve the production build |
 | `npm run lint` | ESLint |
+
+API reference and layout notes: [`backend/README.md`](backend/README.md).
+Interactive docs at <http://localhost:8000/docs> while the API is running.
 
 ## Pages
 
 | Route | Contents |
 | --- | --- |
 | `/` | Dashboard — lead totals per pipeline stage, plus the 5 most recent leads |
-| `/crm` | CRM — the full lead table and the **Add lead** form |
+| `/crm` | CRM — the full lead table, the **Add lead** form, and per-row editing |
 
 ## Where to go next
 
@@ -53,12 +73,15 @@ are the stretch goals once you're comfortable in the codebase:
 
 Some starting points in the code:
 
-- Lead shape, pipeline statuses, and all mutations live in
-  [`src/context/LeadsContext.tsx`](src/context/LeadsContext.tsx) — add a field
-  there first, then surface it in
+- Lead shape and pipeline statuses live in
+  [`src/context/LeadsContext.tsx`](src/context/LeadsContext.tsx), which also
+  holds every mutation. Adding a field means four places: the `Lead` type there,
+  the Pydantic models in [`backend/app/schemas.py`](backend/app/schemas.py), the
+  table in [`backend/app/db.py`](backend/app/db.py), and the form in
   [`src/components/leads/`](src/components/leads/).
-- Swapping `localStorage` for a real backend means replacing the two effects in
-  `LeadsContext`; nothing else touches storage.
+- The only code that talks to the API is [`src/lib/api.ts`](src/lib/api.ts).
+  Mutations are optimistic — the table updates on click and the request follows,
+  rolling back with a banner if it fails.
 - New pages added under `src/app/(admin)/` pick up the sidebar and header
   automatically. Add them to `navItems` in
   [`src/layout/AppSidebar.tsx`](src/layout/AppSidebar.tsx) to get a menu entry.

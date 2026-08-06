@@ -6,6 +6,14 @@ interface InputProps {
   name?: string;
   placeholder?: string;
   defaultValue?: string | number;
+  /**
+   * Added to the template's props: it shipped with `defaultValue` alone, so the
+   * field could only ever start blank. A form that prefills for an edit needs a
+   * controlled value.
+   */
+  value?: string | number;
+  /** Cap, so the field can't outgrow what the API accepts. */
+  maxLength?: number;
   onChange?: (e: React.ChangeEvent<HTMLInputElement>) => void;
   className?: string;
   min?: string;
@@ -23,6 +31,8 @@ const Input: FC<InputProps> = ({
   name,
   placeholder,
   defaultValue,
+  value,
+  maxLength,
   onChange,
   className = "",
   min,
@@ -33,6 +43,10 @@ const Input: FC<InputProps> = ({
   error = false,
   hint,
 }) => {
+  // React warns when both are set on a DOM input, so a controlled `value` wins
+  // outright and `defaultValue` only applies when no `value` was passed.
+  const valueProps = value !== undefined ? { value } : { defaultValue };
+
   // Determine input styles based on state (disabled, success, error)
   let inputClasses = `h-11 w-full rounded-lg border appearance-none px-4 py-2.5 text-sm shadow-theme-xs placeholder:text-gray-400 focus:outline-hidden focus:ring-3 dark:bg-gray-900 dark:text-white/90 dark:placeholder:text-white/30 dark:focus:border-brand-800 ${className}`;
 
@@ -54,7 +68,8 @@ const Input: FC<InputProps> = ({
         id={id}
         name={name}
         placeholder={placeholder}
-        defaultValue={defaultValue}
+        {...valueProps}
+        maxLength={maxLength}
         onChange={onChange}
         min={min}
         max={max}
