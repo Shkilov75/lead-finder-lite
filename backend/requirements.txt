@@ -1,5 +1,8 @@
-# Deliberately three lines. SQLite access uses Python's own `sqlite3` module —
-# there is no ORM here, and the app needs no database driver to install.
+# Four lines. Postgres access uses psycopg's own SQL interface — there is still
+# no ORM here. `[binary]` pulls a prebuilt libpq wheel, so neither a local build
+# toolchain nor a system libpq is needed, which is what makes this installable
+# unchanged in Vercel's build image.
 fastapi>=0.118
 uvicorn[standard]>=0.37
 pydantic>=2.12
+psycopg[binary]>=3.2

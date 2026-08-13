@@ -1,0 +1,5 @@
+# Vercel's Python runtime installs from the requirements.txt at the project root.
+# Pointing it at the backend's own file rather than restating the pins keeps one
+# source of truth — a dependency added for local dev cannot then be missing in
+# production, which is the failure mode a duplicated list invites.
+-r backend/requirements.txt

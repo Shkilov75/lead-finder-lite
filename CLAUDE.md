@@ -12,7 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 4. Advance status by clicking the badge: `New → Contacted → Replied → Closed`
 5. A **research notes** field that students paste findings into **by hand**
 
-There is **no scraping, enrichment, or third-party data provider anywhere**, and that is a deliberate product constraint, not an unfinished edge — it keeps the class demo free and safe to run. Do not add live lookup, enrichment, or a data-provider integration unless explicitly asked. (The app's *own* FastAPI backend is not an exception to this — the rule is about pulling in outside data.) The original guide's 5-skill chain (ICP Builder → Prospect Finder → Company Spy → Message Crafter → Follow-Up Sequencer) is a post-workshop stretch goal, not the current scope.
+There is **no scraping, enrichment, or third-party data provider anywhere**, and that is a deliberate product constraint, not an unfinished edge — it keeps the class demo free and safe to run. Do not add live lookup, enrichment, or a data-provider integration unless explicitly asked. (The app's *own* FastAPI backend and its *own* Supabase database are not exceptions to this — the rule is about pulling in outside data, not about where this app keeps its own.) The original guide's 5-skill chain (ICP Builder → Prospect Finder → Company Spy → Message Crafter → Follow-Up Sequencer) is a post-workshop stretch goal, not the current scope.
 
 ## Commands
 
@@ -26,7 +26,13 @@ npm run start    # serve the production build
 npm run lint     # eslint (eslint-config-next)
 ```
 
-First-time backend setup: `cd backend && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt`.
+First-time backend setup, in order:
+
+1. `cd backend && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt`
+2. Run [supabase/migrations/0001_create_leads.sql](supabase/migrations/0001_create_leads.sql) once in the Supabase SQL editor — the app never issues DDL.
+3. `cp .env.example .env.local` and fill in `DATABASE_URL`.
+
+**There is no offline mode.** `DATABASE_URL` is required; `config.py` raises at import time when it is missing, rather than falling back to anything. Don't reintroduce a local SQLite path as a "convenient default" — two code paths means the one you don't run in production is the one that breaks there.
 
 There is **no test runner installed** on either side — don't assume `npm test` or `pytest` exists. `npm run build` is the type-check gate for the frontend; for the backend, `curl` against a running `uvicorn` (or `/docs`) is the check.
 
@@ -41,22 +47,38 @@ Two pages, both `'use client'` because they read lead state from context:
 - `src/app/(admin)/page.tsx` — Dashboard: stat cards + 5 most recent leads
 - `src/app/(admin)/crm/page.tsx` — CRM: full table + the add/edit modal
 
-`/api/*` is **not** a Next.js route — there are no route handlers and no server actions. [next.config.ts](next.config.ts) rewrites it to the FastAPI app at `BACKEND_ORIGIN` (default `http://localhost:8000`), so the browser only ever makes same-origin requests and no API URL reaches the client bundle.
+`/api/*` is **not** a Next.js route — there are no route handlers and no server actions. It reaches the FastAPI app by two different mechanisms depending on the environment, and both keep the browser making same-origin requests with no API URL in the client bundle:
+
+- **Development:** [next.config.ts](next.config.ts) rewrites `/api/*` to `BACKEND_ORIGIN` (default `http://localhost:8000`), the uvicorn process from `npm run dev:api`.
+- **Production:** that rewrite returns `[]` — see the `VERCEL` guard. [vercel.json](vercel.json) routes `/api/*` to the Python function in [api/index.py](api/index.py) instead. Leaving the dev rewrite active on Vercel would point the deployed site at `localhost:8000`, so the guard is load-bearing. It keys off `VERCEL` rather than `NODE_ENV` deliberately: `next build`/`next start` also run with `NODE_ENV=production`, and rewrites are frozen into `routes-manifest.json` at build time, so a `NODE_ENV` check would strip the rewrite from a *local* production build too and leave `npm run start` with no API at all.
 
 The `(admin)` route group owns the chrome. [src/app/(admin)/layout.tsx](src/app/(admin)/layout.tsx) composes `AppSidebar` + `AppHeader` + `Backdrop` and computes the main content's left margin from sidebar state — so a new page dropped into `(admin)/` inherits the shell with no wiring. [src/app/layout.tsx](src/app/layout.tsx) holds the three providers: `ThemeProvider` → `SidebarProvider` → `LeadsProvider`.
 
 ### Backend
 
-[backend/](backend/) — FastAPI over a SQLite file, mounted at `/api`. Stdlib `sqlite3`, **no ORM**; `backend/README.md` has the endpoint table. Layers: `config` → `db` → `schemas` → `repository` → `routers/leads` → `main`.
+[backend/](backend/) — FastAPI over **Supabase Postgres**, mounted at `/api`. `psycopg` v3 with hand-written SQL, **no ORM**; `backend/README.md` has the endpoint table. Layers: `config` → `db` → `schemas` → `repository` → `routers/leads` → `main`.
 
-- **All SQL lives in `repository.py`.** Everything is parameterised with `?`; the one place a column name varies at runtime (`update_lead`) picks it from the `UPDATABLE_COLUMNS` whitelist, never from the request body.
-- **One connection per request**, via the `get_conn` dependency. Endpoints are sync `def` on purpose — FastAPI runs those in a threadpool, where blocking `sqlite3` calls are harmless; `async def` would block the event loop. A module-level connection would then be several requests deep at once, so don't hoist it.
-- **`check_same_thread=False` is load-bearing, not a shortcut.** FastAPI runs a sync generator dependency and its endpoint in *different* threadpool threads, so the connection `get_conn` opens is always used from a thread other than the one that created it. Without the flag every overlapping request raises `ProgrammingError` — and sequential testing won't reveal it, because anyio hands out the same idle worker twice. The flag only disables sqlite3's guard against *sharing* a connection; per-request construction is what actually keeps this safe.
-- **`advance_status` picks the next status inside the `UPDATE`**, via a parameterised `CASE`. Reading the row and writing the successor back would need an explicit `BEGIN IMMEDIATE` — a bare `SELECT` starts no transaction, so two clicks arriving together would both read the same status and one would be lost.
-- **Seeding fires only when the `leads` table did not exist**, checked against `sqlite_master` before `CREATE TABLE` — never merely when the table is empty. This is the same trap the old `localStorage` code hit: seeding an empty table resurrects the three examples every time someone deletes their last lead and restarts. Preserve it.
-- `created_at` is stored as a **full ISO timestamp** but serialised as `yyyy-mm-dd`. The time component only exists so `ORDER BY created_at DESC` is stable — with dates alone, leads added the same day come back in arbitrary order. The date alone is what `formatLeadDate` parses.
+- **All SQL lives in `repository.py`.** Everything is parameterised with `%s`; the one place a column name varies at runtime (`update_lead`) picks it from the `UPDATABLE_COLUMNS` whitelist, never from the request body.
+- **One connection per request**, via the `get_conn` dependency. Endpoints are sync `def` on purpose — FastAPI runs those in a threadpool, where blocking psycopg calls are harmless; `async def` would block the event loop. psycopg connections are not safe to share across threads, so don't hoist one to module level.
+- **Always connect through the transaction pooler** (Supavisor, port `6543`), never the direct host. The direct host resolves to IPv6 only, which Vercel's Python functions cannot be relied on to reach, and per-invocation connections would otherwise exhaust Postgres' connection limit.
+- **`prepare_threshold=None` is load-bearing, not a tuning knob.** psycopg promotes a repeated statement to a server-side prepared statement, but the pooler's transaction mode hands each transaction whatever backend is free — so the `PREPARE` and the `EXECUTE` land on different backends and the execute fails. Like the old `check_same_thread` trap, sequential testing won't reveal it; it surfaces under concurrency.
+- **Writes use `RETURNING`.** An insert or update is one round trip, not a write followed by a `SELECT`. Against a local file that second query was free; over the pooler it is another network hop on every mutation.
+- **`ILIKE`, not `LIKE`.** SQLite's `LIKE` was case-insensitive for ASCII, Postgres' is not — reverting this quietly makes the search box case-sensitive.
+- **`advance_status` picks the next status inside the `UPDATE`**, via a parameterised `CASE`. Reading the row and writing the successor back would need an explicit `SELECT ... FOR UPDATE` — a bare `SELECT` takes no row lock, so two clicks arriving together would both read the same status and one would be lost.
+- **The app never issues DDL.** The schema lives in [supabase/migrations/0001_create_leads.sql](supabase/migrations/0001_create_leads.sql) and is applied by hand, once. A startup hook runs on *every* cold start on Vercel, which would mean many instances racing to `CREATE TABLE` against a shared database. Seeding moved there too, and the old "seed only on the first run, never merely when the table is empty" rule is carried by the `where not exists (select 1 from public.leads)` on the seed insert. **`on conflict do nothing` does not enforce it** — that clause only swallows duplicate-key errors, so deleting a seed and re-pasting the migration would bring it straight back.
+- **RLS is enabled on `leads` with no policies, deliberately.** Supabase exposes every `public` table through PostgREST to anyone holding the anon key, which is designed to ship in browser code. No policies means PostgREST is denied outright; the backend is unaffected because it connects as the table owner, which bypasses RLS. Don't "fix" the missing policy without deciding to open that API up.
+- `created_at` is a **`timestamptz`** but is serialised as `yyyy-mm-dd`. The time component only exists so `ORDER BY created_at DESC` is stable — with dates alone, leads added the same day come back in arbitrary order. The date alone is what `formatLeadDate` parses.
 - `LeadOut` uses `alias_generator=to_camel`, so responses match the TS `Lead` type field for field. That is why `src/lib/api.ts` is a fetch wrapper with **no renaming layer** — keep it that way.
-- The pipeline order is spelled out in `db.LEAD_STATUSES` (which builds the table's `CHECK` constraint), `repository.NEXT_STATUS`, and `schemas.LeadStatus`; a module-level `assert` in `schemas.py` holds the last two together. Advancing is a **server** decision — the client's `nextStatus` only predicts it.
+- The pipeline order is spelled out in four places now: `db.LEAD_STATUSES`, `repository.NEXT_STATUS`, `schemas.LeadStatus`, and the `CHECK` constraint in the migration. A module-level `assert` in `schemas.py` holds the first three together; the fourth is SQL and cannot be asserted from Python, so **changing a status name means editing the migration too** — otherwise the insert fails the constraint at runtime. Advancing is a **server** decision; the client's `nextStatus` only predicts it.
+
+### Deployment
+
+One Vercel project serves both halves. Next.js is the framework preset; the FastAPI app rides along as a Python serverless function.
+
+- [api/index.py](api/index.py) is the entry point. Vercel serves any `app` in `api/*.py` that speaks ASGI — no uvicorn, no port. It puts `backend/` on `sys.path` and imports `app.main`, matching how uvicorn runs locally, so there is only one import root to reason about.
+- [vercel.json](vercel.json) rewrites `/api/(.*)` onto that single function, so FastAPI keeps doing its own routing, and `includeFiles` pulls `backend/**` into the bundle — without it the function ships as one file and the import fails.
+- The root [requirements.txt](requirements.txt) is just `-r backend/requirements.txt`. Vercel installs from the root; pointing it at the backend's own list keeps one source of truth so a dependency added for local dev can't be missing in production.
+- `DATABASE_URL` is set as a Vercel Environment Variable, never in a committed file. It contains the database password.
 
 ### Lead state (frontend)
 

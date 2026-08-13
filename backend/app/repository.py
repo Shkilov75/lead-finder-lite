@@ -1,12 +1,32 @@
 """Every SQL statement in the app lives here.
 
-The functions take a `sqlite3.Connection` and know nothing about HTTP — the
+The functions take a `psycopg.Connection` and know nothing about HTTP — the
 router turns their return values into responses and status codes.
+
+Three things changed in the move from SQLite to Postgres, and each is load-bearing:
+
+* Placeholders are `%s`, not `?`. They are still placeholders — no value is ever
+  formatted into a statement.
+* Writes use `RETURNING`, so an insert or update is **one** round trip instead of
+  a write followed by a `SELECT`. Over a local file that second query was free;
+  over the pooler it is another network hop on every mutation.
+* `LIKE` became `ILIKE`. SQLite's `LIKE` is case-insensitive for ASCII by
+  default, Postgres' is not — keeping `LIKE` would have quietly made the search
+  box case-sensitive.
+
+Writes are wrapped in `with conn.transaction():`, **not** `with conn:`. They look
+interchangeable and are not: psycopg 3's `Connection.__exit__` commits and then
+*closes* the connection, unlike psycopg2's, where `with conn` was a transaction
+block and nothing more. Under `with conn:` every mutation would hand back a dead
+connection halfway through the request — harmless only for as long as no endpoint
+runs a second statement afterwards, and a confusing "the connection is closed" the
+first time one does. Closing belongs to `db.get_conn`, which owns the connection.
 """
 
-import sqlite3
-from datetime import datetime, timezone
-from uuid import uuid4
+from datetime import timezone
+from typing import Any
+
+import psycopg
 
 from .db import LEAD_STATUSES
 from .schemas import LeadCreate, LeadOut, LeadUpdate
@@ -28,18 +48,22 @@ COLUMNS = (
 UPDATABLE_COLUMNS = ("company", "contact", "title", "notes", "research", "status")
 
 
-def now_iso() -> str:
-    """UTC, second precision, e.g. `2026-08-06T14:23:11Z`."""
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def row_to_lead(row: sqlite3.Row) -> LeadOut:
+def row_to_lead(row: dict[str, Any]) -> LeadOut:
     """Turns a database row into the response model.
 
-    `created_at` is stored as a full timestamp but exposed as the date alone.
-    The timestamp exists so `ORDER BY created_at DESC` is stable — with the date
-    alone, three leads added on the same day would come back in arbitrary order.
-    The date alone is what the UI shows, and what `formatLeadDate` parses.
+    `created_at` is a `timestamptz` in the database but is exposed as the date
+    alone. The time component exists so `ORDER BY created_at DESC` is stable —
+    with the date alone, three leads added on the same day would come back in
+    arbitrary order. The date alone is what the UI shows, and what
+    `formatLeadDate` parses.
+
+    The `astimezone(utc)` is not redundant. psycopg hands back a tz-aware
+    datetime in the *session's* time zone, so `.date()` on it would answer "what
+    day is it where the database thinks it lives". Supabase defaults that to UTC
+    and everything lines up — until a role- or pooler-level `TimeZone` setting
+    says otherwise, at which point every lead created late in the day silently
+    reports the wrong date. Pinning to UTC keeps this the same answer the SQLite
+    version gave by slicing an ISO string that always ended in `Z`.
     """
     return LeadOut(
         id=row["id"],
@@ -49,18 +73,18 @@ def row_to_lead(row: sqlite3.Row) -> LeadOut:
         notes=row["notes"],
         research=row["research"],
         status=row["status"],
-        created_at=row["created_at"][:10],
+        created_at=row["created_at"].astimezone(timezone.utc).date().isoformat(),
     )
 
 
 def _like_pattern(term: str) -> str:
-    """Escapes the wildcards SQLite's LIKE would otherwise honour in user input."""
+    """Escapes the wildcards ILIKE would otherwise honour in user input."""
     escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     return f"%{escaped}%"
 
 
 def list_leads(
-    conn: sqlite3.Connection,
+    conn: psycopg.Connection,
     status: str | None = None,
     q: str | None = None,
 ) -> list[LeadOut]:
@@ -70,12 +94,12 @@ def list_leads(
     params: list[str] = []
 
     if status:
-        clauses.append("status = ?")
+        clauses.append("status = %s")
         params.append(status)
 
     if q and q.strip():
         clauses.append(
-            "(company LIKE ? ESCAPE '\\' OR contact LIKE ? ESCAPE '\\')"
+            "(company ILIKE %s ESCAPE '\\' OR contact ILIKE %s ESCAPE '\\')"
         )
         pattern = _like_pattern(q.strip())
         params.extend([pattern, pattern])
@@ -88,51 +112,41 @@ def list_leads(
     return [row_to_lead(row) for row in rows]
 
 
-def get_lead(conn: sqlite3.Connection, lead_id: str) -> LeadOut | None:
+def get_lead(conn: psycopg.Connection, lead_id: str) -> LeadOut | None:
     row = conn.execute(
-        f"SELECT {COLUMNS} FROM leads WHERE id = ?", (lead_id,)
+        f"SELECT {COLUMNS} FROM leads WHERE id = %s", (lead_id,)
     ).fetchone()
     return row_to_lead(row) if row else None
 
 
-def create_lead(conn: sqlite3.Connection, data: LeadCreate) -> LeadOut:
-    """Server owns the id, the starting status, and the timestamps."""
-    lead_id = str(uuid4())
-    timestamp = now_iso()
+def create_lead(conn: psycopg.Connection, data: LeadCreate) -> LeadOut:
+    """Server owns the id, the starting status, and the timestamps.
 
-    with conn:
-        conn.execute(
-            """
-            INSERT INTO leads
-              (id, company, contact, title, notes, research,
-               status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, 'New', ?, ?)
+    All three come from column defaults in the migration rather than from Python,
+    so there is one authoritative answer to "what time is it" — the database's.
+    """
+    with conn.transaction():
+        row = conn.execute(
+            f"""
+            INSERT INTO leads (company, contact, title, notes, research, status)
+            VALUES (%s, %s, %s, %s, %s, 'New')
+            RETURNING {COLUMNS}
             """,
-            (
-                lead_id,
-                data.company,
-                data.contact,
-                data.title,
-                data.notes,
-                data.research,
-                timestamp,
-                timestamp,
-            ),
-        )
+            (data.company, data.contact, data.title, data.notes, data.research),
+        ).fetchone()
 
-    lead = get_lead(conn, lead_id)
-    assert lead is not None  # just inserted in a committed transaction
-    return lead
+    assert row is not None  # INSERT ... RETURNING always yields the inserted row
+    return row_to_lead(row)
 
 
 def update_lead(
-    conn: sqlite3.Connection, lead_id: str, patch: LeadUpdate
+    conn: psycopg.Connection, lead_id: str, patch: LeadUpdate
 ) -> LeadOut | None:
     """Applies a partial edit. Returns None when the lead does not exist.
 
-    `mode="json"` so a `LeadStatus` member arrives as the plain string SQLite can
-    store; `exclude_unset` so "field omitted" and "field set to its default" stay
-    distinguishable — omitting `notes` must not blank it out.
+    `mode="json"` so a `LeadStatus` member arrives as the plain string the column
+    stores; `exclude_unset` so "field omitted" and "field set to its default"
+    stay distinguishable — omitting `notes` must not blank it out.
     """
     changes = patch.model_dump(mode="json", exclude_unset=True, exclude_none=True)
     fields = [name for name in changes if name in UPDATABLE_COLUMNS]
@@ -140,51 +154,48 @@ def update_lead(
     if not fields:
         return get_lead(conn, lead_id)
 
-    assignments = ", ".join(f"{name} = ?" for name in fields)
+    assignments = ", ".join(f"{name} = %s" for name in fields)
     params = [changes[name] for name in fields]
-    params.append(now_iso())
     params.append(lead_id)
 
-    with conn:
-        cursor = conn.execute(
-            f"UPDATE leads SET {assignments}, updated_at = ? WHERE id = ?",
+    with conn.transaction():
+        row = conn.execute(
+            f"UPDATE leads SET {assignments}, updated_at = now() "
+            f"WHERE id = %s RETURNING {COLUMNS}",
             params,
-        )
+        ).fetchone()
 
-    if cursor.rowcount == 0:
-        return None
-    return get_lead(conn, lead_id)
+    # No row returned means no row matched — the id is gone.
+    return row_to_lead(row) if row else None
 
 
-# `CASE status WHEN ? THEN ? ... END`, one pair per status. Built once, and still
-# fully parameterised — the placeholders are filled from NEXT_STATUS below.
-_ADVANCE_CASE = "CASE status " + "WHEN ? THEN ? " * len(NEXT_STATUS) + "END"
+# `CASE status WHEN %s THEN %s ... END`, one pair per status. Built once, and
+# still fully parameterised — the placeholders are filled from NEXT_STATUS below.
+_ADVANCE_CASE = "CASE status " + "WHEN %s THEN %s " * len(NEXT_STATUS) + "END"
 _ADVANCE_PARAMS = [value for pair in NEXT_STATUS.items() for value in pair]
 
 
-def advance_status(conn: sqlite3.Connection, lead_id: str) -> LeadOut | None:
+def advance_status(conn: psycopg.Connection, lead_id: str) -> LeadOut | None:
     """Moves the lead one step along the pipeline, wrapping Closed back to New.
 
     The next status is chosen by the UPDATE itself rather than by reading the row
     first and writing the successor back. A read-then-write would need an
-    explicit `BEGIN IMMEDIATE` to be safe — a bare SELECT starts no transaction,
-    so two clicks arriving together could both read the same status and one of
-    them would be lost. One statement has no such window.
+    explicit `SELECT ... FOR UPDATE` to be safe — a bare SELECT takes no row
+    lock, so two clicks arriving together could both read the same status and one
+    of them would be lost. One statement has no such window.
     """
-    with conn:
-        cursor = conn.execute(
-            f"UPDATE leads SET status = {_ADVANCE_CASE}, updated_at = ? "
-            "WHERE id = ?",
-            [*_ADVANCE_PARAMS, now_iso(), lead_id],
-        )
+    with conn.transaction():
+        row = conn.execute(
+            f"UPDATE leads SET status = {_ADVANCE_CASE}, updated_at = now() "
+            f"WHERE id = %s RETURNING {COLUMNS}",
+            [*_ADVANCE_PARAMS, lead_id],
+        ).fetchone()
 
-    if cursor.rowcount == 0:
-        return None
-    return get_lead(conn, lead_id)
+    return row_to_lead(row) if row else None
 
 
-def delete_lead(conn: sqlite3.Connection, lead_id: str) -> bool:
+def delete_lead(conn: psycopg.Connection, lead_id: str) -> bool:
     """True when a row was removed, False when the id was already gone."""
-    with conn:
-        cursor = conn.execute("DELETE FROM leads WHERE id = ?", (lead_id,))
+    with conn.transaction():
+        cursor = conn.execute("DELETE FROM leads WHERE id = %s", (lead_id,))
     return cursor.rowcount > 0

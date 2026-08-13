@@ -1,25 +1,32 @@
-"""Runtime configuration, read from the environment with workshop-friendly defaults.
+"""Runtime configuration, read from the environment.
 
-Nothing here is required to run the app — `uvicorn app.main:app` works out of the
-box. The environment variables exist so the database can be pointed at a scratch
-file, and so the allowed origins can change without editing code.
+Unlike the SQLite version this replaced, `DATABASE_URL` is **required** — there is
+no local file to fall back to, so a missing URL is a configuration error and is
+reported as one at import time rather than as a connection failure on the first
+request.
 
-`LEAD_FINDER_DB` must name a file. `:memory:` is not an option: connections are
-opened per request (see `db.get_conn`), and an in-memory database belongs to the
-one connection that created it, so every request would get an empty one.
+Point it at Supabase's **transaction pooler** (Supavisor, port 6543), not at the
+database host directly. Two reasons, both of which bite only in production:
+
+* Direct connections (`db.<ref>.supabase.co:5432`) resolve to IPv6 only. Vercel's
+  Python functions cannot be relied on to have IPv6 egress, so the direct host is
+  simply unreachable from the deployed app.
+* Every serverless invocation opens its own connection. Postgres caps those in
+  the low hundreds; the pooler multiplexes them so a traffic spike degrades
+  instead of exhausting `max_connections`.
 """
 
 import os
-from pathlib import Path
 
-# backend/app/config.py -> backend/
-BACKEND_DIR = Path(__file__).resolve().parent.parent
+# postgresql://postgres.<project-ref>:<password>@aws-0-<region>.pooler.supabase.com:6543/postgres
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 
-DEFAULT_DB_PATH = BACKEND_DIR / "data" / "leads.db"
-
-# Absolute, so the server finds the same file regardless of the working directory
-# uvicorn was launched from.
-DB_PATH = Path(os.environ.get("LEAD_FINDER_DB", DEFAULT_DB_PATH)).resolve()
+if not DATABASE_URL:
+    raise RuntimeError(
+        "DATABASE_URL is not set. Copy .env.example to .env.local and paste the "
+        "Supabase connection string (Project Settings -> Database -> Connection "
+        "string -> Transaction pooler)."
+    )
 
 # The Next.js dev server. Comma-separated to allow more than one.
 DEFAULT_CORS_ORIGINS = "http://localhost:3000"

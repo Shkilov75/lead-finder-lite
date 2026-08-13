@@ -1,11 +1,13 @@
 """HTTP surface for leads.
 
-Endpoints are sync `def`, not `async def`, on purpose: `sqlite3` calls block, and
-FastAPI runs sync handlers in a threadpool where blocking is harmless. Declaring
-them `async` would block the event loop instead.
+Endpoints are sync `def`, not `async def`, on purpose: `psycopg`'s sync driver
+blocks, and FastAPI runs sync handlers in a threadpool where blocking is
+harmless. Declaring them `async` would block the event loop instead — and over a
+network connection to the pooler the blocking window is far longer than it was
+against a local SQLite file.
 """
 
-import sqlite3
+import psycopg
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 
@@ -25,7 +27,7 @@ def health() -> dict[str, str]:
 
 @router.get("/leads", response_model=list[LeadOut])
 def list_leads(
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: psycopg.Connection = Depends(get_conn),
     # Named `lead_status` locally so it does not shadow fastapi's `status` module,
     # which the decorators above use for the response codes.
     lead_status: LeadStatus | None = Query(
@@ -41,7 +43,7 @@ def list_leads(
 @router.post("/leads", response_model=LeadOut, status_code=status.HTTP_201_CREATED)
 def create_lead(
     payload: LeadCreate,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: psycopg.Connection = Depends(get_conn),
 ) -> LeadOut:
     return repository.create_lead(conn, payload)
 
@@ -49,7 +51,7 @@ def create_lead(
 @router.get("/leads/{lead_id}", response_model=LeadOut)
 def get_lead(
     lead_id: str,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: psycopg.Connection = Depends(get_conn),
 ) -> LeadOut:
     lead = repository.get_lead(conn, lead_id)
     if lead is None:
@@ -61,7 +63,7 @@ def get_lead(
 def update_lead(
     lead_id: str,
     payload: LeadUpdate,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: psycopg.Connection = Depends(get_conn),
 ) -> LeadOut:
     """PATCH rather than PUT — the body is a partial edit, not a replacement."""
     lead = repository.update_lead(conn, lead_id, payload)
@@ -73,7 +75,7 @@ def update_lead(
 @router.post("/leads/{lead_id}/advance", response_model=LeadOut)
 def advance_status(
     lead_id: str,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: psycopg.Connection = Depends(get_conn),
 ) -> LeadOut:
     """POST, not PATCH: calling it twice moves the lead two steps, so it is not
     idempotent. The next status is computed here so the pipeline order has one
@@ -87,7 +89,7 @@ def advance_status(
 @router.delete("/leads/{lead_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_lead(
     lead_id: str,
-    conn: sqlite3.Connection = Depends(get_conn),
+    conn: psycopg.Connection = Depends(get_conn),
 ) -> Response:
     if not repository.delete_lead(conn, lead_id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, NOT_FOUND)
