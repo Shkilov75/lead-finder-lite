@@ -77,7 +77,7 @@ One Vercel project serves both halves. Next.js is the framework preset; the Fast
 
 - [api/index.py](api/index.py) is the entry point. Vercel serves any `app` in `api/*.py` that speaks ASGI — no uvicorn, no port. It puts `backend/` on `sys.path` and imports `app.main`, matching how uvicorn runs locally, so there is only one import root to reason about.
 - [vercel.json](vercel.json) rewrites `/api/(.*)` onto that single function, so FastAPI keeps doing its own routing, and `includeFiles` pulls `backend/**` into the bundle — without it the function ships as one file and the import fails.
-- The root [requirements.txt](requirements.txt) is just `-r backend/requirements.txt`. Vercel installs from the root; pointing it at the backend's own list keeps one source of truth so a dependency added for local dev can't be missing in production.
+- The dependency pins live in the root [requirements.txt](requirements.txt), and [backend/requirements.txt](backend/requirements.txt) is the one-line `-r ../requirements.txt` that includes them. One source of truth, so a dependency added for local dev can't be missing in production. **Don't invert it.** Vercel installs from the root and parses that file itself, and its parser rejects the `-r` include directive — a root file saying `-r backend/requirements.txt` fails with `could not parse requirements.txt: Error parsing included file`, and it fails *after* the Next.js build has succeeded, so it reads like a frontend problem. pip is happy with `-r`, which is why the indirection sits on the pip side.
 - `DATABASE_URL` is set as a Vercel Environment Variable, never in a committed file. It contains the database password.
 
 ### Lead state (frontend)

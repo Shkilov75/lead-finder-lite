@@ -1,8 +1,10 @@
-# Four lines. Postgres access uses psycopg's own SQL interface — there is still
-# no ORM here. `[binary]` pulls a prebuilt libpq wheel, so neither a local build
-# toolchain nor a system libpq is needed, which is what makes this installable
-# unchanged in Vercel's build image.
-fastapi>=0.118
-uvicorn[standard]>=0.37
-pydantic>=2.12
-psycopg[binary]>=3.2
+# The real list is the repository root's requirements.txt. This file only
+# includes it, so `pip install -r requirements.txt` from inside backend/
+# installs exactly what Vercel installs — one source of truth, so a dependency
+# added for local dev cannot go missing in production.
+#
+# Don't invert this by moving the pins back here and pointing the root file at
+# them. Vercel's Python runtime parses the root requirements.txt itself and
+# rejects `-r`, so the root has to hold the literal pins; pip, which reads this
+# file, resolves `-r` relative to the file it appears in and is happy with it.
+-r ../requirements.txt
