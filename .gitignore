@@ -26,8 +26,12 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-# local env files
-.env*.local
+# local env files — ignore every .env variant, then re-admit the committed
+# template. `.env*.local` alone missed a plain `.env`, which is the filename
+# secrets most often land in.
+.env
+.env.*
+!.env.example
 
 # python backend (see also backend/.gitignore)
 backend/.venv/
@@ -37,8 +41,14 @@ backend/data/*.db-shm
 __pycache__/
 *.py[cod]
 
-# vercel
+# vercel — .vercel/ holds the linked org/project ids written by `vercel link`
 .vercel
+
+# supabase CLI — supabase/config.toml is meant to be committed; these are not.
+# .temp/ caches the project ref and pooler credentials after `supabase link`.
+.supabase/
+supabase/.temp/
+supabase/.branches/
 
 # typescript
 *.tsbuildinfo
