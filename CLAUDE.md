@@ -101,6 +101,8 @@ Distinguish the two, because they have different rules:
 
 `LeadsTable` is shared by both pages — the Dashboard passes a sliced list, and omits `onEdit` so no pencil button renders there. Status colours live in one map in [src/components/leads/StatusPill.tsx](src/components/leads/StatusPill.tsx).
 
+The trash button arms [src/components/leads/ConfirmDeleteModal.tsx](src/components/leads/ConfirmDeleteModal.tsx) rather than calling `deleteLead` — deleting is the only action with no way back, where a status advance wraps `Closed → New` and an edit can be retyped. The pending row is held in `LeadsTable`, not in either page, so the Dashboard's trash icons get the same confirm with no wiring; it stores the **lead**, not a boolean, because the copy names the row and the icons sit one under another. `window.confirm` is not the shortcut it looks like: it is unstyled, ignores dark mode, and blocks the tab. The modal closes on confirm without waiting for the request — `deleteLead` is optimistic, and a failure puts the row back and surfaces in `LeadsErrorBanner`.
+
 `LeadFormModal` serves both adding and editing. Its fields are **fully controlled**, and capped with `MAX_LENGTH`, which mirrors the `StringConstraints` in `backend/app/schemas.py` — without that, a long paste is accepted, the modal closes, and only then does the API 422.
 
 `useState(initialDraft)` initialises once per mount and `Modal` unmounts its children rather than the form component, so the CRM page keys the form on a **counter bumped on every open**. Keying on the lead id would not change when the same row is edited twice in a row, leaving stale text in the fields — and saving would then write the first edit back over the second.
@@ -112,6 +114,7 @@ Saving is fire-and-close, so a failed request would take the typed draft with it
 These were changed for cause; don't "restore" them by copying the upstream file back:
 
 - `Button` gained a `type` prop defaulting to `"button"` — without it, a Cancel button inside a `<form>` submits it.
+- `Button` gained a `danger` variant, used by the delete confirmation. Passing red through `className` does not work: it is concatenated *ahead* of the variant classes, and Tailwind resolves conflicting utilities by their order in the generated stylesheet, not by their order in the attribute — so the variant's `bg-*` wins anyway.
 - `AppHeader`'s search `<form>` has no action and no handler, so **any** submit — Enter in the field, or the decorative ⌘K keycap, which defaulted to `type="submit"` — fired a native GET navigation that reloaded the page and discarded React state. It now calls `preventDefault`, and the keycap is `type="button"`.
 - `TextArea` gained an `id` prop; without it a `<Label htmlFor>` pointed at nothing and the field had no accessible name.
 - `Input` gained a `value` prop. It shipped with `defaultValue` only, so a field could never start with anything in it — `LeadFormModal` needs controlled inputs to prefill an edit. `value` and `defaultValue` are spread conditionally so React never sees both.
