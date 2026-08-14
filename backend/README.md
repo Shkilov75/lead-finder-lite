@@ -1,8 +1,9 @@
 # Lead Finder Lite API
 
-FastAPI over a SQLite file. It stores leads and nothing else — no scraping, no
-enrichment, no third-party data provider. Research notes are typed in by hand,
-on purpose.
+FastAPI over Supabase Postgres. It stores leads and nothing else — no scraping,
+no enrichment, no third-party data provider. Research notes are typed in by hand,
+on purpose. (Supabase is this app's *own* database, which is what the
+no-data-provider rule has always allowed.)
 
 ## Setup
 
@@ -12,18 +13,29 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
 
+Then create the table. Open the Supabase dashboard → **SQL Editor** → New query,
+paste [`supabase/migrations/0001_create_leads.sql`](../supabase/migrations/0001_create_leads.sql),
+and run it once. The application never issues DDL — see *Schema* below.
+
+Finally, copy `.env.example` to `.env.local` in the repository root and fill in
+`DATABASE_URL`.
+
 ## Run
 
 ```bash
 .venv/bin/uvicorn app.main:app --reload --port 8000
 ```
 
-Or from the repository root: `npm run dev:api`.
+Or from the repository root: `npm run dev:api`, which loads `.env.local` first.
 
 Interactive docs: <http://localhost:8000/docs>.
 
 The Next.js dev server proxies `/api/*` here (see `next.config.ts`), so with both
 processes running the browser only ever talks to `localhost:3000`.
+
+There is no offline mode. `DATABASE_URL` is required and the app refuses to
+import without it — the old local SQLite file is gone, so a missing URL is a
+configuration error rather than a silent fallback to a different database.
 
 ## Endpoints
 
@@ -48,30 +60,67 @@ for field — which is why `src/lib/api.ts` needs no renaming layer.
 
 | File | Contents |
 | --- | --- |
-| `app/config.py` | Database path and CORS origins, from the environment |
-| `app/db.py` | Connection helper, schema, first-run seeding |
+| `app/config.py` | `DATABASE_URL` and CORS origins, from the environment |
+| `app/db.py` | Connection helper and the FastAPI dependency |
 | `app/schemas.py` | Pydantic request/response models |
 | `app/repository.py` | Every SQL statement in the app |
 | `app/routers/leads.py` | HTTP endpoints |
-| `app/main.py` | App wiring: lifespan, CORS, router |
+| `app/main.py` | App wiring: CORS, router |
+| `../api/index.py` | Vercel entry point — imports this same `app` |
 
-Data access is the standard library's `sqlite3` — no ORM, no database driver to
-install. Two things to preserve when editing it:
+Data access is `psycopg` (v3) using plain SQL — still no ORM. Five things to
+preserve when editing it:
 
 - **One connection per request** (`db.get_conn`, a FastAPI dependency). The
-  endpoints are sync `def`, so FastAPI runs them in a threadpool; a shared
-  connection with `check_same_thread=False` would be several requests deep at
-  once.
-- **Seed only when the table did not exist**, never merely when it is empty.
-  Seeding an empty table would resurrect the three examples every time someone
-  deleted their last lead and restarted the server.
+  endpoints are sync `def`, so FastAPI runs them in a threadpool; psycopg
+  connections are not safe to share across threads, and a module-level one would
+  be several requests deep at once.
+- **`prepare_threshold=None`.** Supavisor's transaction mode gives each
+  transaction whatever backend is free, so a server-side prepared statement
+  routinely gets `PREPARE`d on one backend and `EXECUTE`d on another. Removing
+  this flag makes the app fail only under concurrency, which is the worst way to
+  find out.
+- **Writes use `RETURNING`.** One round trip per mutation instead of a write
+  followed by a `SELECT`. Over a network connection the second query is not free.
+- **`ILIKE`, not `LIKE`.** SQLite's `LIKE` was case-insensitive for ASCII;
+  Postgres' is not. Reverting this would quietly make the search box
+  case-sensitive.
+- **`with conn.transaction():` around writes, never `with conn:`.** In psycopg 3
+  a connection used as a context manager commits *and closes* on exit — unlike
+  psycopg2, where `with conn` was only a transaction block. `with conn:` leaves
+  the rest of the request holding a closed connection, which stays invisible
+  exactly until some handler runs a second statement.
+
+## Schema
+
+The table is defined in `supabase/migrations/0001_create_leads.sql` and applied
+by hand, once. Nothing in the application creates or alters it.
+
+That is a change from the SQLite version, which created its table on startup.
+On a serverless platform a startup hook runs on *every cold start*, so it would
+mean many instances racing to issue the same DDL against a shared database. It
+also relocates the "seed only on the first run, never merely when the table is
+empty" rule, which now lives in the seed insert's
+`where not exists (select 1 from public.leads)`.
+
+The trailing `on conflict do nothing` is **not** what enforces that rule, and
+reading it as if it did is the trap: it only suppresses duplicate-key errors, so
+on its own it would happily resurrect a seed you had deleted the moment anyone
+pasted the file a second time. The `where not exists` is the guard; the
+`on conflict` clause is only there for two people running the migration at once.
+
+The migration also enables Row Level Security with **no policies**, which is
+what keeps the table off Supabase's public PostgREST API. The backend is
+unaffected — it connects as the table's owner, which bypasses RLS. See the
+comment in the migration for the full reasoning.
 
 ## Environment
 
-| Variable | Default | Purpose |
+| Variable | Required | Purpose |
 | --- | --- | --- |
-| `LEAD_FINDER_DB` | `backend/data/leads.db` | Database file. Point it at a scratch path to experiment without touching real data. Must be a file — `:memory:` cannot work, because connections are per-request and an in-memory database dies with the connection that made it |
-| `CORS_ORIGINS` | `http://localhost:3000` | Comma-separated allowed origins |
+| `DATABASE_URL` | **yes** | Supabase connection string. Use the **transaction pooler** (port `6543`), not the direct connection — the direct host is IPv6-only and Vercel's Python functions cannot be relied on to reach it, and the pooler is what keeps per-invocation connections from exhausting Postgres' limit |
+| `CORS_ORIGINS` | no | Comma-separated allowed origins. Default `http://localhost:3000` |
 
-The database file is created on first start, seeded with the same three example
-leads the UI used to ship with. It is gitignored — delete it to start over.
+`DATABASE_URL` contains the database password. It belongs in `.env.local`
+(gitignored) locally and in Vercel's Environment Variables in production — never
+in a committed file.

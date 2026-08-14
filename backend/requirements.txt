@@ -1,5 +1,10 @@
-# Deliberately three lines. SQLite access uses Python's own `sqlite3` module —
-# there is no ORM here, and the app needs no database driver to install.
-fastapi>=0.118
-uvicorn[standard]>=0.37
-pydantic>=2.12
+# The real list is the repository root's requirements.txt. This file only
+# includes it, so `pip install -r requirements.txt` from inside backend/
+# installs exactly what Vercel installs — one source of truth, so a dependency
+# added for local dev cannot go missing in production.
+#
+# Don't invert this by moving the pins back here and pointing the root file at
+# them. Vercel's Python runtime parses the root requirements.txt itself and
+# rejects `-r`, so the root has to hold the literal pins; pip, which reads this
+# file, resolves `-r` relative to the file it appears in and is happy with it.
+-r ../requirements.txt

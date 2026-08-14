@@ -1,0 +1,21 @@
+# The dependency list for the FastAPI backend, kept here at the project root
+# because that is where Vercel's Python runtime installs from.
+#
+# The pins live in this file and `backend/requirements.txt` includes it, rather
+# than the other way round, and that direction is load-bearing: Vercel's parser
+# rejects the `-r` include directive outright. A root file containing
+# `-r backend/requirements.txt` fails the build with
+#
+#     Error: could not parse requirements.txt: Error parsing included file
+#
+# after the Next.js half has already built successfully, which makes it look
+# like a frontend problem. pip handles `-r` without complaint, so the
+# indirection has to sit on the pip side — see backend/requirements.txt.
+#
+# `[binary]` pulls a prebuilt libpq wheel, so neither a local build toolchain
+# nor a system libpq is needed, which is what makes this installable unchanged
+# in Vercel's build image.
+fastapi>=0.118
+uvicorn[standard]>=0.37
+pydantic>=2.12
+psycopg[binary]>=3.2

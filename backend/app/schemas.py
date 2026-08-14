@@ -27,9 +27,12 @@ class LeadStatus(str, Enum):
     CLOSED = "Closed"
 
 
-# The pipeline is spelled out in three places — this enum, the CHECK constraint
-# in `db.SCHEMA`, and `LEAD_STATUSES` in the frontend. Two of them are in Python,
-# so hold them together here rather than hoping.
+# The pipeline is spelled out in four places — this enum, `db.LEAD_STATUSES`,
+# `LEAD_STATUSES` in the frontend, and the CHECK constraint in
+# supabase/migrations/0001_create_leads.sql. The assert below holds the first two
+# together; the migration is SQL and cannot be asserted from here, so **renaming a
+# status means editing that file too** or the next insert fails the constraint at
+# runtime. (The app never issues DDL, so nothing here will fix it for you.)
 assert tuple(status.value for status in LeadStatus) == LEAD_STATUSES
 
 # Whitespace is stripped before validation, so a field of nothing but spaces
